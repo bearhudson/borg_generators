@@ -11,4 +11,6 @@ pip install cadquery
 python3 borg.py
 ```
 
-Wait a while, and you'll have a STEP file in the root directory.
+Wait a while, and you'll have a STEP file in the root directory. 
+
+I do mean a _while_. It's Python, CAD, and recursion. It's very slow.
