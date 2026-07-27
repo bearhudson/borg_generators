@@ -1,30 +1,79 @@
+import argparse
 import random
+import sys
 import cadquery as cq
 
 # ================================================
-# Borg Surface - Mixed-Scale Greedy Packing
+# Borg Surface - Interactive CAD Generator
 # ================================================
 
-inch = 25.4
-box_x = 156
-box_y = 126
-base_z = 10.0  # 10 mm base thickness
 
-seed = 404
-min_w = 0.45  # Minimum printable wall/feature width (mm)
+def get_user_inputs():
+    """Prompt the user for dimensions, wall thickness, and seed with defaults."""
+    print("\n--- Borg Surface Generator Configuration ---")
+
+    # Box X
+    try:
+        val = input("Enter X dimension in mm [Default: 156]: ").strip()
+        box_x = float(val) if val else 156.0
+    except ValueError:
+        print("Invalid input; defaulting X to 156 mm.")
+        box_x = 156.0
+
+    # Box Y
+    try:
+        val = input("Enter Y dimension in mm [Default: 126]: ").strip()
+        box_y = float(val) if val else 126.0
+    except ValueError:
+        print("Invalid input; defaulting Y to 126 mm.")
+        box_y = 126.0
+
+    # Base Z
+    try:
+        val = input(
+            "Enter Base Thickness (Z) in mm [Default: 10.0]: "
+        ).strip()
+        base_z = float(val) if val else 10.0
+    except ValueError:
+        print("Invalid input; defaulting Z to 10.0 mm.")
+        base_z = 10.0
+
+    # Minimum Wall Thickness
+    try:
+        val = input(
+            "Enter Minimum Wall/Feature Width in mm [Default: 0.45]: "
+        ).strip()
+        min_w = float(val) if val else 0.45
+    except ValueError:
+        print("Invalid input; defaulting min_w to 0.45 mm.")
+        min_w = 0.45
+
+    # Random Seed
+    try:
+        val = input("Enter Random Seed [Default: 404]: ").strip()
+        seed = int(val) if val else 404
+    except ValueError:
+        print("Invalid input; defaulting seed to 404.")
+        seed = 404
+
+    print(
+        f"\nConfiguration: Size = {box_x}x{box_y}x{base_z}mm | Min Wall = {min_w}mm | Seed = {seed}\n"
+    )
+    return box_x, box_y, base_z, min_w, seed
+
+
+# Get user inputs
+box_x, box_y, base_z, min_w, seed = get_user_inputs()
 gap = 0.6  # Clearance gap between packed objects
 
 # ------------------------------------------------
 # Greeble Component Builders
-# (Each returns a cq.Workplane solid at relative 0,0,0)
 # ------------------------------------------------
 
 
 def greeble_large_bay(w, l, h):
-    # Base box
     bay = cq.Workplane("XY").box(w, l, h, centered=(False, False, False))
 
-    # Cut cavity if wide enough
     if w > min_w * 4 and l > min_w * 4:
         cavity = (
             cq.Workplane("XY")
@@ -35,7 +84,6 @@ def greeble_large_bay(w, l, h):
         )
         bay = bay.cut(cavity)
 
-    # Raised internal island
     island = (
         cq.Workplane("XY")
         .workplane(offset=h * 0.2)
@@ -123,21 +171,23 @@ def greeble_small_recess(w, l, h):
 # Spatial Greedy Packing Logic
 # ------------------------------------------------
 
-# 1. Base Box
-assembly = cq.Workplane("XY").box(
-    box_x, box_y, base_z, centered=(False, False, False)
-)
+try:
+    base_box = cq.Workplane("XY").box(
+        box_x, box_y, base_z, centered=(False, False, False)
+    )
+except Exception as e:
+    print(f"Error creating base plate: {e}")
+    sys.exit(1)
 
 step = 6.0
 cols = int(box_x // step)
 rows = int(box_y // step)
 
-# Collect all greebles to union them efficiently
-greeble_solids = []
+raw_shapes = []
+failed_count = 0
 
 for c in range(cols):
     for r in range(rows):
-        # Deterministic pseudo-random seed matching OpenSCAD approach
         p_seed = seed + c * 37 + r * 91
         rng = random.Random(p_seed)
 
@@ -165,43 +215,47 @@ for c in range(cols):
                 eff_w = w - gap
                 eff_l = l - gap
 
-                # Dispatcher
-                if size_cat == 0:
-                    greeble = greeble_large_bay(eff_w, eff_l, h)
-                elif size_cat == 1:
-                    greeble = (
-                        greeble_medium_stepped(eff_w, eff_l, h)
-                        if p_seed % 2 == 0
-                        else greeble_medium_vent(eff_w, eff_l, h)
-                    )
-                else:
-                    greeble = (
-                        greeble_small_node(eff_w, eff_l, h)
-                        if p_seed % 2 == 0
-                        else greeble_small_recess(eff_w, eff_l, h)
-                    )
+                try:
+                    if size_cat == 0:
+                        greeble = greeble_large_bay(eff_w, eff_l, h)
+                    elif size_cat == 1:
+                        greeble = (
+                            greeble_medium_stepped(eff_w, eff_l, h)
+                            if p_seed % 2 == 0
+                            else greeble_medium_vent(eff_w, eff_l, h)
+                        )
+                    else:
+                        greeble = (
+                            greeble_small_node(eff_w, eff_l, h)
+                            if p_seed % 2 == 0
+                            else greeble_small_recess(eff_w, eff_l, h)
+                        )
 
-                # Move to position (x, y, base_z)
-                translated_greeble = greeble.translate((x, y, base_z))
-                greeble_solids.append(translated_greeble)
+                    translated_greeble = greeble.translate((x, y, base_z))
+                    raw_shapes.append(translated_greeble.val())
+                except Exception as e:
+                    failed_count += 1
 
-# Combine all greebles and intersect with boundary bounds
-if greeble_solids:
-    # Batch union all greebles
-    all_greebles = greeble_solids[0]
-    for g in greeble_solids[1:]:
-        all_greebles = all_greebles.union(g)
-
-    # Boundary clip box (matching OpenSCAD's intersection cube)
-    clip_box = cq.Workplane("XY").box(
-        box_x, box_y, base_z + 25, centered=(False, False, False)
-    )
-    clipped_greebles = all_greebles.intersect(clip_box)
-
-    assembly = assembly.union(clipped_greebles)
+if failed_count > 0:
+    print(f"Skipped {failed_count} problematic greebles.")
 
 # ------------------------------------------------
-# Export STEP File
+# Fast Compound Assembly & STEP Export
 # ------------------------------------------------
-cq.exporters.export(assembly, "borg_surface.step")
-print("Successfully exported 'borg_surface.step'")
+
+output_filename = f"borg_surface_{int(box_x)}x{int(box_y)}_seed{seed}.step"
+
+try:
+    if raw_shapes:
+        compound_shape = cq.Compound.makeCompound(raw_shapes)
+        greeble_compound = cq.Workplane("XY").newObject([compound_shape])
+        assembly = base_box.union(greeble_compound)
+    else:
+        assembly = base_box
+
+    cq.exporters.export(assembly, output_filename)
+    print(f"Successfully exported '{output_filename}'!")
+
+except Exception as e:
+    print(f"Error exporting assembly: {e}")
+    sys.exit(1)
