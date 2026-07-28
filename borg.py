@@ -4,7 +4,7 @@ import sys
 import cadquery as cq
 
 # ================================================
-# Borg Surface - Multi-Side CAD Generator
+# Borg Surface - Multi-Side CAD Generator (Fixed)
 # ================================================
 
 
@@ -250,41 +250,41 @@ except Exception as e:
     print(f"Error creating base plate: {e}")
     sys.exit(1)
 
-# Face Definitions: (dim_u, dim_v, translation_vector, rotation_degrees_tuple)
-side_configs = [
-    # Side 1: Top Face (+Z)
-    (box_x, box_y, (0, 0, base_z), (0, 0, 0)),
-    # Side 2: Bottom Face (-Z)
-    (box_x, box_y, (0, box_y, 0), (180, 0, 0)),
-    # Side 3: Front Face (-Y)
-    (box_x, base_z, (0, 0, 0), (90, 0, 0)),
-    # Side 4: Back Face (+Y)
-    (box_x, base_z, (0, box_y, base_z), (-90, 0, 0)),
-    # Side 5: Left Face (-X)
-    (box_y, base_z, (0, box_y, 0), (90, 0, 90)),
-    # Side 6: Right Face (+X)
-    (box_y, base_z, (box_x, 0, 0), (90, 0, -90)),
+# Plane Definitions: Explicit Local Workplane Orientations
+# (dim_u, dim_v, plane_origin, x_dir, normal_dir)
+face_planes = [
+    # Side 1: Top (+Z)
+    (box_x, box_y, (0, 0, base_z), (1, 0, 0), (0, 0, 1)),
+    # Side 2: Bottom (-Z)
+    (box_x, box_y, (0, box_y, 0), (1, 0, 0), (0, 0, -1)),
+    # Side 3: Front (-Y)
+    (box_x, base_z, (0, 0, 0), (1, 0, 0), (0, -1, 0)),
+    # Side 4: Back (+Y)
+    (box_x, base_z, (box_x, box_y, 0), (-1, 0, 0), (0, 1, 0)),
+    # Side 5: Left (-X)
+    (box_y, base_z, (0, box_y, 0), (0, -1, 0), (-1, 0, 0)),
+    # Side 6: Right (+X)
+    (box_y, base_z, (box_x, 0, 0), (0, 1, 0), (1, 0, 0)),
 ]
 
 all_side_shapes = []
 
 for idx in range(num_sides):
-    u_dim, v_dim, loc, rot = side_configs[idx]
+    u_dim, v_dim, origin, x_dir, normal = face_planes[idx]
     side_seed = seed + idx * 1000
 
     raw_side_shapes = generate_side_greebles(u_dim, v_dim, side_seed)
 
-    for shape in raw_side_shapes:
-        # Wrap in workplane and orient onto target box face
-        wp = (
-            cq.Workplane("XY")
-            .newObject([shape])
-            .rotate((0, 0, 0), (1, 0, 0), rot[0])
-            .rotate((0, 0, 0), (0, 1, 0), rot[1])
-            .rotate((0, 0, 0), (0, 0, 1), rot[2])
-            .translate(loc)
+    if raw_side_shapes:
+        # Create local workplane aligned to target face
+        face_plane = cq.Workplane(
+            cq.Plane(origin=origin, xDir=x_dir, normal=normal)
         )
-        all_side_shapes.append(wp.val())
+        side_compound = cq.Compound.makeCompound(raw_side_shapes)
+        oriented_greeble = face_plane.eachpoint(
+            lambda loc: side_compound.moved(loc), useLocalCoordinates=True
+        )
+        all_side_shapes.append(oriented_greeble.val())
 
 # ------------------------------------------------
 # Fast Compound Assembly & STEP Export
@@ -301,7 +301,9 @@ try:
         assembly = base_box
 
     cq.exporters.export(assembly, output_filename)
-    print(f"Successfully exported '{output_filename}' ({num_sides} side(s) generated)!")
+    print(
+        f"Successfully exported '{output_filename}' ({num_sides} side(s) generated)!"
+    )
 
 except Exception as e:
     print(f"Error exporting assembly: {e}")
