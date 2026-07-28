@@ -4,7 +4,8 @@ import sys
 import cadquery as cq
 
 # ================================================
-# Borg Surface - Multi-Side CAD Generator (Fixed)
+# Borg Surface - Multi-Side CAD Generator
+# (With L-Shaped Corner Wrap-Arounds)
 # ================================================
 
 
@@ -12,55 +13,43 @@ def get_user_inputs():
     """Prompt the user for dimensions, wall thickness, sides, and seed with defaults."""
     print("\n--- Borg Surface Generator Configuration ---")
 
-    # Box X
     try:
         val = input("Enter X dimension in mm [Default: 156]: ").strip()
         box_x = float(val) if val else 156.0
     except ValueError:
-        print("Invalid input; defaulting X to 156 mm.")
         box_x = 156.0
 
-    # Box Y
     try:
         val = input("Enter Y dimension in mm [Default: 126]: ").strip()
         box_y = float(val) if val else 126.0
     except ValueError:
-        print("Invalid input; defaulting Y to 126 mm.")
         box_y = 126.0
 
-    # Base Z
     try:
         val = input("Enter Base Thickness (Z) in mm [Default: 10.0]: ").strip()
         base_z = float(val) if val else 10.0
     except ValueError:
-        print("Invalid input; defaulting Z to 10.0 mm.")
         base_z = 10.0
 
-    # Number of Sides
     try:
         val = input("Enter Number of Sides to Greeble (1 to 6) [Default: 1]: ").strip()
         num_sides = int(val) if val else 1
         num_sides = max(1, min(6, num_sides))
     except ValueError:
-        print("Invalid input; defaulting to 1 side.")
         num_sides = 1
 
-    # Minimum Wall Thickness
     try:
         val = input(
             "Enter Minimum Wall/Feature Width in mm [Default: 0.45]: "
         ).strip()
         min_w = float(val) if val else 0.45
     except ValueError:
-        print("Invalid input; defaulting min_w to 0.45 mm.")
         min_w = 0.45
 
-    # Random Seed
     try:
         val = input("Enter Random Seed [Default: 404]: ").strip()
         seed = int(val) if val else 404
     except ValueError:
-        print("Invalid input; defaulting seed to 404.")
         seed = 404
 
     print(
@@ -76,6 +65,35 @@ gap = 0.6  # Clearance gap between packed objects
 # ------------------------------------------------
 # Greeble Component Builders
 # ------------------------------------------------
+
+
+def greeble_corner_l_bracket(w, l, h, leg_down=6.0):
+    """Constructs a 90-degree L-bracket that wraps around an outer edge."""
+    thickness = max(min_w, 1.2)
+
+    # Top leg on the main face
+    top_leg = cq.Workplane("XY").box(w, l, h, centered=(False, False, False))
+
+    # Downward wrap leg over the adjacent face
+    wrap_leg = (
+        cq.Workplane("XY")
+        .workplane(offset=-leg_down)
+        .moveTo(0, l - thickness)
+        .box(w, thickness, leg_down + h, centered=(False, False, False))
+    )
+
+    # Internal detail cutout on the top face
+    if w > min_w * 4 and l > min_w * 4:
+        recess = (
+            cq.Workplane("XY")
+            .workplane(offset=h * 0.5)
+            .moveTo(min_w * 2, min_w * 2)
+            .rect(w - min_w * 4, l - min_w * 4, centered=False)
+            .extrude(h)
+        )
+        return top_leg.union(wrap_leg).cut(recess)
+
+    return top_leg.union(wrap_leg)
 
 
 def greeble_large_bay(w, l, h):
@@ -175,15 +193,16 @@ def greeble_small_recess(w, l, h):
 
 
 # ------------------------------------------------
-# Modular Greeble Generator (2D Plane)
+# Modular Greeble Generator with Edge Detection
 # ------------------------------------------------
 
 
 def generate_side_greebles(dim_u, dim_v, side_seed):
-    """Generates packed greeble shapes on a local U x V coordinate frame."""
+    """Generates packed greebles, placing L-shaped wrap elements near edges."""
     step = 6.0
     cols = int(dim_u // step)
     rows = int(dim_v // step)
+    edge_margin = 12.0  # Distance threshold to detect outer boundary edges
 
     shapes = []
     for c in range(cols):
@@ -211,12 +230,25 @@ def generate_side_greebles(dim_u, dim_v, side_seed):
                 l = max(min_w * 3, min(l_raw, dim_v - v - gap))
                 h = rng.uniform(1.5, 6.5)
 
+                # Check if this placement touches an outer edge
+                is_edge = (
+                    (u + w >= dim_u - edge_margin)
+                    or (v + l >= dim_v - edge_margin)
+                    or (u <= edge_margin)
+                    or (v <= edge_margin)
+                )
+
                 if w > min_w * 2 and l > min_w * 2:
                     eff_w = w - gap
                     eff_l = l - gap
 
                     try:
-                        if size_cat == 0:
+                        # Use L-bracket wrap if at a corner/edge
+                        if is_edge and rng.random() > 0.4:
+                            greeble = greeble_corner_l_bracket(
+                                eff_w, eff_l, h, leg_down=rng.uniform(4.0, 8.0)
+                            )
+                        elif size_cat == 0:
                             greeble = greeble_large_bay(eff_w, eff_l, h)
                         elif size_cat == 1:
                             greeble = (
@@ -251,7 +283,6 @@ except Exception as e:
     sys.exit(1)
 
 # Plane Definitions: Explicit Local Workplane Orientations
-# (dim_u, dim_v, plane_origin, x_dir, normal_dir)
 face_planes = [
     # Side 1: Top (+Z)
     (box_x, box_y, (0, 0, base_z), (1, 0, 0), (0, 0, 1)),
@@ -276,7 +307,6 @@ for idx in range(num_sides):
     raw_side_shapes = generate_side_greebles(u_dim, v_dim, side_seed)
 
     if raw_side_shapes:
-        # Create local workplane aligned to target face
         face_plane = cq.Workplane(
             cq.Plane(origin=origin, xDir=x_dir, normal=normal)
         )
@@ -290,7 +320,9 @@ for idx in range(num_sides):
 # Fast Compound Assembly & STEP Export
 # ------------------------------------------------
 
-output_filename = f"borg_surface_{int(box_x)}x{int(box_y)}_{num_sides}sides_seed{seed}.step"
+output_filename = (
+    f"borg_surface_{int(box_x)}x{int(box_y)}_{num_sides}sides_seed{seed}.step"
+)
 
 try:
     if all_side_shapes:
