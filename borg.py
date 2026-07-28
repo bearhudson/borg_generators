@@ -4,12 +4,12 @@ import sys
 import cadquery as cq
 
 # ================================================
-# Borg Surface - Interactive CAD Generator
+# Borg Surface - Multi-Side CAD Generator
 # ================================================
 
 
 def get_user_inputs():
-    """Prompt the user for dimensions, wall thickness, and seed with defaults."""
+    """Prompt the user for dimensions, wall thickness, sides, and seed with defaults."""
     print("\n--- Borg Surface Generator Configuration ---")
 
     # Box X
@@ -30,13 +30,20 @@ def get_user_inputs():
 
     # Base Z
     try:
-        val = input(
-            "Enter Base Thickness (Z) in mm [Default: 10.0]: "
-        ).strip()
+        val = input("Enter Base Thickness (Z) in mm [Default: 10.0]: ").strip()
         base_z = float(val) if val else 10.0
     except ValueError:
         print("Invalid input; defaulting Z to 10.0 mm.")
         base_z = 10.0
+
+    # Number of Sides
+    try:
+        val = input("Enter Number of Sides to Greeble (1 to 6) [Default: 1]: ").strip()
+        num_sides = int(val) if val else 1
+        num_sides = max(1, min(6, num_sides))
+    except ValueError:
+        print("Invalid input; defaulting to 1 side.")
+        num_sides = 1
 
     # Minimum Wall Thickness
     try:
@@ -57,13 +64,13 @@ def get_user_inputs():
         seed = 404
 
     print(
-        f"\nConfiguration: Size = {box_x}x{box_y}x{base_z}mm | Min Wall = {min_w}mm | Seed = {seed}\n"
+        f"\nConfiguration: Size = {box_x}x{box_y}x{base_z}mm | Sides = {num_sides} | Min Wall = {min_w}mm | Seed = {seed}\n"
     )
-    return box_x, box_y, base_z, min_w, seed
+    return box_x, box_y, base_z, num_sides, min_w, seed
 
 
 # Get user inputs
-box_x, box_y, base_z, min_w, seed = get_user_inputs()
+box_x, box_y, base_z, num_sides, min_w, seed = get_user_inputs()
 gap = 0.6  # Clearance gap between packed objects
 
 # ------------------------------------------------
@@ -168,7 +175,71 @@ def greeble_small_recess(w, l, h):
 
 
 # ------------------------------------------------
-# Spatial Greedy Packing Logic
+# Modular Greeble Generator (2D Plane)
+# ------------------------------------------------
+
+
+def generate_side_greebles(dim_u, dim_v, side_seed):
+    """Generates packed greeble shapes on a local U x V coordinate frame."""
+    step = 6.0
+    cols = int(dim_u // step)
+    rows = int(dim_v // step)
+
+    shapes = []
+    for c in range(cols):
+        for r in range(rows):
+            p_seed = side_seed + c * 37 + r * 91
+            rng = random.Random(p_seed)
+
+            if rng.random() > 0.35:
+                u = c * step
+                v = r * step
+
+                size_cat = int(rng.uniform(0, 3))
+
+                if size_cat == 0:
+                    w_raw = rng.uniform(20, 36)
+                    l_raw = rng.uniform(20, 36)
+                elif size_cat == 1:
+                    w_raw = rng.uniform(10, 18)
+                    l_raw = rng.uniform(10, 18)
+                else:
+                    w_raw = rng.uniform(3, 8)
+                    l_raw = rng.uniform(3, 8)
+
+                w = max(min_w * 3, min(w_raw, dim_u - u - gap))
+                l = max(min_w * 3, min(l_raw, dim_v - v - gap))
+                h = rng.uniform(1.5, 6.5)
+
+                if w > min_w * 2 and l > min_w * 2:
+                    eff_w = w - gap
+                    eff_l = l - gap
+
+                    try:
+                        if size_cat == 0:
+                            greeble = greeble_large_bay(eff_w, eff_l, h)
+                        elif size_cat == 1:
+                            greeble = (
+                                greeble_medium_stepped(eff_w, eff_l, h)
+                                if p_seed % 2 == 0
+                                else greeble_medium_vent(eff_w, eff_l, h)
+                            )
+                        else:
+                            greeble = (
+                                greeble_small_node(eff_w, eff_l, h)
+                                if p_seed % 2 == 0
+                                else greeble_small_recess(eff_w, eff_l, h)
+                            )
+
+                        translated = greeble.translate((u, v, 0))
+                        shapes.append(translated.val())
+                    except Exception:
+                        pass
+    return shapes
+
+
+# ------------------------------------------------
+# Multi-Face Assembly Logic
 # ------------------------------------------------
 
 try:
@@ -179,82 +250,58 @@ except Exception as e:
     print(f"Error creating base plate: {e}")
     sys.exit(1)
 
-step = 6.0
-cols = int(box_x // step)
-rows = int(box_y // step)
+# Face Definitions: (dim_u, dim_v, translation_vector, rotation_degrees_tuple)
+side_configs = [
+    # Side 1: Top Face (+Z)
+    (box_x, box_y, (0, 0, base_z), (0, 0, 0)),
+    # Side 2: Bottom Face (-Z)
+    (box_x, box_y, (0, box_y, 0), (180, 0, 0)),
+    # Side 3: Front Face (-Y)
+    (box_x, base_z, (0, 0, 0), (90, 0, 0)),
+    # Side 4: Back Face (+Y)
+    (box_x, base_z, (0, box_y, base_z), (-90, 0, 0)),
+    # Side 5: Left Face (-X)
+    (box_y, base_z, (0, box_y, 0), (90, 0, 90)),
+    # Side 6: Right Face (+X)
+    (box_y, base_z, (box_x, 0, 0), (90, 0, -90)),
+]
 
-raw_shapes = []
-failed_count = 0
+all_side_shapes = []
 
-for c in range(cols):
-    for r in range(rows):
-        p_seed = seed + c * 37 + r * 91
-        rng = random.Random(p_seed)
+for idx in range(num_sides):
+    u_dim, v_dim, loc, rot = side_configs[idx]
+    side_seed = seed + idx * 1000
 
-        if rng.random() > 0.35:
-            x = c * step
-            y = r * step
+    raw_side_shapes = generate_side_greebles(u_dim, v_dim, side_seed)
 
-            size_cat = int(rng.uniform(0, 3))
-
-            if size_cat == 0:
-                w_raw = rng.uniform(20, 36)
-                l_raw = rng.uniform(20, 36)
-            elif size_cat == 1:
-                w_raw = rng.uniform(10, 18)
-                l_raw = rng.uniform(10, 18)
-            else:
-                w_raw = rng.uniform(3, 8)
-                l_raw = rng.uniform(3, 8)
-
-            w = max(min_w * 3, min(w_raw, box_x - x - gap))
-            l = max(min_w * 3, min(l_raw, box_y - y - gap))
-            h = rng.uniform(1.5, 6.5)
-
-            if w > min_w * 2 and l > min_w * 2:
-                eff_w = w - gap
-                eff_l = l - gap
-
-                try:
-                    if size_cat == 0:
-                        greeble = greeble_large_bay(eff_w, eff_l, h)
-                    elif size_cat == 1:
-                        greeble = (
-                            greeble_medium_stepped(eff_w, eff_l, h)
-                            if p_seed % 2 == 0
-                            else greeble_medium_vent(eff_w, eff_l, h)
-                        )
-                    else:
-                        greeble = (
-                            greeble_small_node(eff_w, eff_l, h)
-                            if p_seed % 2 == 0
-                            else greeble_small_recess(eff_w, eff_l, h)
-                        )
-
-                    translated_greeble = greeble.translate((x, y, base_z))
-                    raw_shapes.append(translated_greeble.val())
-                except Exception as e:
-                    failed_count += 1
-
-if failed_count > 0:
-    print(f"Skipped {failed_count} problematic greebles.")
+    for shape in raw_side_shapes:
+        # Wrap in workplane and orient onto target box face
+        wp = (
+            cq.Workplane("XY")
+            .newObject([shape])
+            .rotate((0, 0, 0), (1, 0, 0), rot[0])
+            .rotate((0, 0, 0), (0, 1, 0), rot[1])
+            .rotate((0, 0, 0), (0, 0, 1), rot[2])
+            .translate(loc)
+        )
+        all_side_shapes.append(wp.val())
 
 # ------------------------------------------------
 # Fast Compound Assembly & STEP Export
 # ------------------------------------------------
 
-output_filename = f"borg_surface_{int(box_x)}x{int(box_y)}_seed{seed}.step"
+output_filename = f"borg_surface_{int(box_x)}x{int(box_y)}_{num_sides}sides_seed{seed}.step"
 
 try:
-    if raw_shapes:
-        compound_shape = cq.Compound.makeCompound(raw_shapes)
+    if all_side_shapes:
+        compound_shape = cq.Compound.makeCompound(all_side_shapes)
         greeble_compound = cq.Workplane("XY").newObject([compound_shape])
         assembly = base_box.union(greeble_compound)
     else:
         assembly = base_box
 
     cq.exporters.export(assembly, output_filename)
-    print(f"Successfully exported '{output_filename}'!")
+    print(f"Successfully exported '{output_filename}' ({num_sides} side(s) generated)!")
 
 except Exception as e:
     print(f"Error exporting assembly: {e}")
