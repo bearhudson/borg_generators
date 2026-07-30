@@ -14,3 +14,12 @@ python3 borg.py
 Input dimensions, wait a while, and you'll have a STEP file in the root directory. 
 
 I do mean a _while_. It's Python, CAD, and recursion. It's very slow.
+
+For side generation the order is:
+
+Top dimension [X x Y] x Z
+Bottom -Z
+Front -Y
+Back +X
+Left -X
+Right +X
